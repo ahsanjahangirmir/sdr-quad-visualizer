@@ -6,6 +6,14 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objs as go
 
+
+BUCKET_COLORS = {
+    "Top 20%": "#22c55e",        # green
+    "Upper-Mid 30%": "#3b82f6",  # blue
+    "Lower-Mid 30%": "#f59e0b",  # amber
+    "Bottom 20%": "#f43f5e",     # pinkish red
+}
+
 # =============================
 # Helpers
 # =============================
@@ -167,35 +175,67 @@ def compute_quadrants(df: pd.DataFrame, e_thr: float, p_thr: float) -> pd.DataFr
     ]
     return df
 
-
 def make_scatter(df: pd.DataFrame, effort_thr: float, perf_thr: float, person_col: str) -> go.Figure:
     fig = go.Figure()
 
-    # Points
-    fig.add_trace(
-        go.Scattergl(
-            x=df['Effort %'],
-            y=df['Performance %'],
-            mode='markers',
-            marker=dict(size=7, color='#00a0f9'),
-            hovertemplate=(
-                f"{person_col}: %{{customdata[0]}}<br>Effort %%: %{{x:.2f}}<br>Performance %%: %{{y:.2f}}<extra></extra>"
-            ),
-            customdata=np.c_[df[person_col]],
+    if 'Bucket' in df.columns:
+        # one trace per bucket to get a legend and distinct colors
+        for bucket, sub in df.groupby('Bucket', dropna=False):
+            name = str(bucket) if pd.notna(bucket) else 'Unspecified'
+            color = BUCKET_COLORS.get(bucket, '#94a3b8')  # fallback gray
+            fig.add_trace(
+                go.Scattergl(
+                    x=sub['Effort %'],
+                    y=sub['Performance %'],
+                    mode='markers',
+                    name=name,
+                    marker=dict(size=7, color=color),
+                    hovertemplate=(
+                        f"{person_col}: %{{customdata[0]}}"
+                        "<br>Bucket: " + name +
+                        "<br>Effort %%: %{x:.2f}"
+                        "<br>Performance %%: %{y:.2f}<extra></extra>"
+                    ),
+                    customdata=np.c_[sub[person_col]],
+                )
+            )
+    else:
+        # fallback (previous single-trace behavior)
+        fig.add_trace(
+            go.Scattergl(
+                x=df['Effort %'],
+                y=df['Performance %'],
+                mode='markers',
+                marker=dict(size=7, color='#00a0f9'),
+                hovertemplate=(
+                    f"{person_col}: %{{customdata[0]}}"
+                    "<br>Effort %%: %{x:.2f}"
+                    "<br>Performance %%: %{y:.2f}<extra></extra>"
+                ),
+                customdata=np.c_[df[person_col]],
+            )
         )
-    )
 
     # Threshold lines
-    fig.add_shape(type="line", x0=effort_thr, x1=effort_thr, y0=df['Performance %'].min(), y1=df['Performance %'].max(),
-                  line=dict(color='#ffd53e', width=2))
-    fig.add_shape(type="line", x0=df['Effort %'].min(), x1=df['Effort %'].max(), y0=perf_thr, y1=perf_thr,
-                  line=dict(color='#bb48dd', width=2))
+    fig.add_shape(
+        type="line",
+        x0=effort_thr, x1=effort_thr,
+        y0=df['Performance %'].min(), y1=df['Performance %'].max(),
+        line=dict(color='#ffd53e', width=2)
+    )
+    fig.add_shape(
+        type="line",
+        x0=df['Effort %'].min(), x1=df['Effort %'].max(),
+        y0=perf_thr, y1=perf_thr,
+        line=dict(color='#bb48dd', width=2)
+    )
 
     fig.update_layout(
         xaxis_title='Effort %',
         yaxis_title='Performance %',
         margin=dict(l=40, r=20, t=20, b=40),
-        height=520,
+        height=720,
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
     )
     return fig
 
@@ -439,6 +479,35 @@ with r2:
             label="View Raw Dataset",
             icon=":material/grid_on:",
         )
+
+st.markdown(
+    f"""
+    <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin: 0.25rem 0 0.5rem 0;">
+      <div style="display:flex; align-items:center; gap:6px;">
+        <span style="width:14px;height:14px;background:#ffd53e;border-radius:3px;display:inline-block;"></span>
+        <span><b>Effort Threshold:</b> {effort_threshold:.2f}%</span>
+        <span>|</span>
+      </div>
+      <div style="display:flex; align-items:center; gap:6px;">
+        <span style="width:14px;height:14px;background:#bb48dd;border-radius:3px;display:inline-block;"></span>
+        <span><b>Performance Threshold:</b> {performance_threshold:.2f}%</span>
+        <span>|</span>
+      </div>
+      <div style="display:flex; align-items:center; gap:6px;">
+        <span><b>CR Normalization Factor:</b> {conv_norm_factor:.4f}</span>
+        <span>|</span>
+      </div>
+      <div style="display:flex; align-items:center; gap:6px;">
+        <span><b>Conversion Rate Weightage (Performance):</b> {w_cr_slider:.2f}</span>
+        <span>|</span>
+      </div>
+      <div style="display:flex; align-items:center; gap:6px;">
+        <span><b>Attainment Weightage (Performance):</b> {(1.0 - w_cr_slider):.2f}</span>
+      </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 fig = make_scatter(df, effort_threshold, performance_threshold, person_col)
 st.plotly_chart(fig, use_container_width=True, theme=None)
