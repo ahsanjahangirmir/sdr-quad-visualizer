@@ -42,6 +42,12 @@ def to_fraction(series: pd.Series) -> pd.Series:
         s = s / 100.0
     return s
 
+def _sync_effort_from_chart():
+    st.session_state["effort_thr"] = st.session_state.get("effort_thr_chart", st.session_state.get("effort_thr", 60.0))
+
+def _sync_perf_from_chart():
+    st.session_state["perf_thr"] = st.session_state.get("perf_thr_chart", st.session_state.get("perf_thr", 60.0))
+
 
 def compute_average_coe(
     df: pd.DataFrame,
@@ -237,7 +243,7 @@ def make_scatter(df: pd.DataFrame, effort_thr: float, perf_thr: float, person_co
         xaxis_title='Effort %',
         yaxis_title='Performance %',
         margin=dict(l=40, r=20, t=20, b=40),
-        height=720,
+        height=780,
         legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
     )
     return fig
@@ -765,7 +771,7 @@ with r2:
 
 st.markdown(
     f"""
-    <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin: 0.25rem 0 0.5rem 0;">
+    <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin: 0.25rem 0 1.5rem 0;">
       <div style="display:flex; align-items:center; gap:6px;">
         <span style="width:14px;height:14px;background:#ffd53e;border-radius:3px;display:inline-block;"></span>
         <span><b>Effort Threshold:</b> {effort_threshold:.2f}%</span>
@@ -791,6 +797,29 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+with st.expander('Modify Thresholds', expanded=True):
+    col_thr1, col_thr2 = st.columns(2)
+    with col_thr1:
+        st.number_input(
+            '% Effort Threshold',
+            min_value=0.0,
+            value=float(st.session_state.get("effort_thr", effort_threshold)),  # show current
+            step=1.0,
+            key="effort_thr_chart",            
+            format="%.2f",
+            on_change=_sync_effort_from_chart, 
+        )
+    with col_thr2:
+        st.number_input(
+            '% Performance Threshold',
+            min_value=0.0,
+            value=float(st.session_state.get("perf_thr", performance_threshold)),
+            step=1.0,
+            key="perf_thr_chart",              
+            format="%.2f",
+            on_change=_sync_perf_from_chart,   
+        )
 
 fig = make_scatter(df, effort_threshold, performance_threshold, person_col)
 st.plotly_chart(fig, use_container_width=True, theme=None)
