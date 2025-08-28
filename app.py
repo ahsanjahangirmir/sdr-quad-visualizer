@@ -7,6 +7,7 @@ import streamlit as st
 import plotly.graph_objs as go
 from urllib.parse import urlencode
 import streamlit.components.v1 as components
+import re 
 
 
 BUCKET_COLORS = {
@@ -280,14 +281,12 @@ def copy_to_clipboard_widget(text: str, key: str = 'copy_settings'):
 # Query Param helpers
 # -----------------------------
 
-# Short codes for COE vars (stable URL keys)
-COE_LONG2SHORT = {
-    'Average Dials': 'dials',
-    'Average Call Time': 'call',
-    'Average Emails Sent': 'emails',
-    'Average SMS Sent': 'sms',
+LEGACY_COE_SHORT2LONG = {
+    'dials': 'Average Dials',
+    'call': 'Average Call Time',
+    'emails': 'Average Emails Sent',
+    'sms': 'Average SMS Sent',
 }
-COE_SHORT2LONG = {v: k for k, v in COE_LONG2SHORT.items()}
 
 TF_OUT = {'No': 'no', 'Normalize': 'norm', 'Clip to 100': 'clip'}
 TF_IN  = {v: k for k, v in TF_OUT.items()}
@@ -335,17 +334,44 @@ def _parse_csv_list(s: str | None) -> list[str]:
         return []
     return [x.strip() for x in s.split(',') if x.strip()]
 
+def _parse_weights_qs(s: str | None) -> dict[str, float]:
+    """
+    Parse 'col:weight,col2:weight2' into a dict.
+    NOTE: assumes column names don't contain commas/colons.
+    """
+    out: dict[str, float] = {}
+    if not s:
+        return out
+    for token in _parse_csv_list(s):
+        if ':' not in token:
+            continue
+        col, val = token.split(':', 1)
+        try:
+            out[col] = float(val)
+        except:
+            pass
+    return out
+
+def _encode_weights_qs(weights: dict[str, float], cols_order: list[str]) -> str:
+    """Encode weights for selected cols in a stable order."""
+    parts = []
+    for c in cols_order:
+        if c in weights:
+            parts.append(f"{c}:{float(weights[c]):.6g}")
+    return ",".join(parts)
+
+
 def settings_to_query_params(settings: dict) -> dict[str, str]:
-    """Flatten your `settings` dict to URL-safe key=val strings."""
-    coe_vars_short = [COE_LONG2SHORT[v] for v in settings['coe']['selected_vars'] if v in COE_LONG2SHORT]
-    weights = settings['coe']['weights']
+    """Flatten settings to URL-safe strings (generic COE: any numeric columns)."""
+    sel = settings['coe']['selected_vars']  # list of column names
+    weights = settings['coe']['weights']    # dict col->weight
+
     params = {
         'person': settings['person_col'],
-        'coe_vars': ','.join(coe_vars_short),
-        'w_dials': f"{float(weights.get('Average Dials', 0.0)):.6g}",
-        'w_call': f"{float(weights.get('Average Call Time', 0.0)):.6g}",
-        'w_emails': f"{float(weights.get('Average Emails Sent', 0.0)):.6g}",
-        'w_sms': f"{float(weights.get('Average SMS Sent', 0.0)):.6g}",
+        # coe_vars: comma-separated column NAMES (URL-encoded by urlencode later)
+        'coe_vars': ",".join(sel),
+        # coe_w: 'col:weight,col2:weight2'
+        'coe_w': _encode_weights_qs(weights, sel),
         'coe_denom': f"{float(settings['coe']['denominator']):.6g}",
         'effort': EFFORT_OUT[settings['effort']['include']],
         'w_coe': f"{float(settings['effort']['w_coe']):.6g}",
@@ -359,6 +385,7 @@ def settings_to_query_params(settings: dict) -> dict[str, str]:
         'p_thr': f"{float(settings['thresholds']['performance_threshold_pct']):.6g}",
     }
     return params
+
 
 
 def _current_query_as_strdict() -> dict[str,str]:
@@ -424,6 +451,7 @@ with st.sidebar:
 
 # --- Read query params to prefill defaults ---
 _q = _qp_raw()
+numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
 
 # person column default via ?person=
 person_options = df.columns.tolist()
@@ -439,7 +467,8 @@ else:
 person_col = st.sidebar.selectbox(
     'Identifier column (for hover/table)',
     options=person_options,
-    index=person_default_index
+    index=person_default_index,
+    key="person_col_select",
 )
 # =============================
 # 1) Configuration Section
@@ -450,30 +479,53 @@ st.header('Configuration')
 with st.expander('Average COE Score', expanded=True):
     st.caption('Select variables and weights to compute **Average COE Score** and **Normalized COE**')
 
-    coe_vars_all = ['Average Dials', 'Average Call Time', 'Average Emails Sent', 'Average SMS Sent']
+    # Any numeric columns can be used for COE
+    coe_vars_all = numeric_cols
 
-    # From query params: ?coe_vars=dials,call,emails,sms
-    qp_coe_vars = _parse_csv_list(_qp_get_str(_q, 'coe_vars', None))
-    coe_default = [COE_SHORT2LONG[s] for s in qp_coe_vars if s in COE_SHORT2LONG] or coe_vars_all
+    # Read from query: allow both new style (full names) and legacy short tokens
+    _raw_sel = _parse_csv_list(_qp_get_str(_q, 'coe_vars', None))
+    qp_coe_vars = [
+        LEGACY_COE_SHORT2LONG.get(tok, tok)  # map legacy tokens to long names if present
+        for tok in _raw_sel
+    ]
+    # Default: select ALL numeric columns (keeps prior "Select All" behavior)
+    coe_default = [c for c in qp_coe_vars if c in coe_vars_all] or coe_vars_all
 
-    coe_selected = st.multiselect('COE Variables', options=coe_vars_all, default=coe_default)
+    coe_selected = st.multiselect(
+        'COE Variables (numeric columns)',
+        options=coe_vars_all,
+        default=coe_default,
+        key="coe_vars",
+    )
 
-    # Default weights (override by query params if present)
-    default_w = {
-        'Average Dials': float(_qp_get_float(_q, 'w_dials', 0.8)),
-        'Average Call Time': float(_qp_get_float(_q, 'w_call', 0.1)),
-        'Average Emails Sent': float(_qp_get_float(_q, 'w_emails', 0.05)),
-        'Average SMS Sent': float(_qp_get_float(_q, 'w_sms', 0.05)),
+    # Weights from query (?coe_w=col:1.2,col2:0.3); fall back to 1.0 each if not provided
+    qp_w_map = _parse_weights_qs(_qp_get_str(_q, 'coe_w', None))
+
+    # Also accept legacy per-column keys if present (only for those 4 columns)
+    legacy_w_candidates = {
+        'Average Dials': _qp_get_float(_q, 'w_dials', None),
+        'Average Call Time': _qp_get_float(_q, 'w_call', None),
+        'Average Emails Sent': _qp_get_float(_q, 'w_emails', None),
+        'Average SMS Sent': _qp_get_float(_q, 'w_sms', None),
     }
 
-    coe_weights = {}
+    def _slug(s: str) -> str:
+        return re.sub(r'[^a-zA-Z0-9_]+', '_', s)
+
+    coe_weights: dict[str, float] = {}
     cols = st.columns(min(4, max(1, len(coe_selected)))) if coe_selected else [st]
     for i, col in enumerate(coe_selected):
         with cols[i % len(cols)]:
+            # default priority: ?coe_w mapping > legacy w_* > 1.0
+            dv = qp_w_map.get(col, legacy_w_candidates.get(col))
+            if dv is None:
+                dv = 1.0
             coe_weights[col] = st.number_input(
                 f"Weight · {col}",
                 min_value=0.0, max_value=10.0, step=0.01,
-                value=float(default_w.get(col, 0.0)),
+                value=float(dv),
+                key=f"w_{_slug(col)}",
+                format="%.6f",
             )
 
     coe_denominator = st.number_input(
@@ -481,7 +533,9 @@ with st.expander('Average COE Score', expanded=True):
         min_value=0.000001,
         value=float(_qp_get_float(_q, 'coe_denom', 1000.0)),
         step=10.0,
-        help='Normalized COE = Average COE Score / denominator'
+        help='Normalized COE = Average COE Score / denominator',
+        key="coe_den",
+        format="%.6f",
     )
 
 
@@ -489,14 +543,20 @@ with st.expander('Effort calculation', expanded=True):
     st.caption('Configure **Effort** from Normalized COE and/or Average % Active')
     
     effort_default = EFFORT_IN.get(_qp_get_str(_q, 'effort', 'both'), 'Both')
-    effort_choice = st.radio('Include in Effort',
-                         options=['Both', 'Normalized COE', 'Average % Active'],
-                         index=['Both','Normalized COE','Average % Active'].index(effort_default),
-                         horizontal=True)
+    effort_choice = st.radio(
+        'Include in Effort',
+        options=['Both', 'Normalized COE', 'Average % Active'],
+        index=['Both','Normalized COE','Average % Active'].index(effort_default),
+        horizontal=True,
+        key="effort_choice",
+    )
 
     if effort_choice == 'Both':
         w_coe_default = float(_qp_get_float(_q, 'w_coe', 0.6))
-        w_coe = st.slider('Weight for Normalized COE (w_coe)', 0.0, 1.0, w_coe_default, 0.01)
+        w_coe = st.slider(
+            'Weight for Normalized COE (w_coe)', 0.0, 1.0, w_coe_default, 0.01,
+            key="w_coe_slider"
+        )
     elif effort_choice == 'Normalized COE':
         w_coe = 1.0
         st.info('Using Normalized COE only (w_coe=1, w_activity=0)')
@@ -514,6 +574,7 @@ with st.expander('Performance calculation', expanded=True):
             PERF_IN.get(_qp_get_str(_q, 'perf', 'both'), 'Both')
         ),
         horizontal=True,
+        key="perf_choice",
     )
 
     # Conversion options
@@ -521,31 +582,42 @@ with st.expander('Performance calculation', expanded=True):
     conv_norm_factor = 0.025
     if perf_choice in ('Both', 'Average % Conversion Rate'):
         st.subheader('Conversion Rate')
-        conv_transform = st.selectbox('Transform (Conversion)', options=['No', 'Normalize'],
-                                    index=['No','Normalize'].index(TF_IN.get(_qp_get_str(_q, 'cr_tf', 'norm'), 'Normalize')))
+        conv_transform = st.selectbox(
+            'Transform (Conversion)', options=['No', 'Normalize'],
+            index=['No','Normalize'].index(TF_IN.get(_qp_get_str(_q, 'cr_tf', 'norm'), 'Normalize')),
+            key="conv_tf",)
 
         conv_max = to_fraction(df['Average % Conversion Rate']).max(skipna=True)
         conv_max = float(conv_max) if pd.notna(conv_max) else 1.0
         conv_upper = max(conv_max, 0.05)
         default_norm = float(_qp_get_float(_q, 'cr_norm', 0.025))
         default_norm = default_norm if default_norm <= conv_upper else conv_upper
-        conv_norm_factor = st.slider('Normalization Factor (CR)', min_value=1e-6, max_value=conv_upper,
-                                    value=float(default_norm), step=1e-6, format='%.6f')
+        conv_norm_factor = st.slider(
+            'Normalization Factor (CR)', min_value=1e-6, max_value=conv_upper,
+            value=float(default_norm), step=1e-6, format='%.6f',
+            key="cr_norm_slider",
+        )
 
     # Attainment options
     ta_transform = 'No'
     if perf_choice in ('Both', 'Average % Weekly Target Point Attainment'):
         st.subheader('Weekly Target Point Attainment')
-        ta_transform = st.selectbox('Transform (Attainment)',
-                            options=['No', 'Clip to 100', 'Normalize'],
-                            index=['No','Clip to 100','Normalize'].index(
-                                TF_IN.get(_qp_get_str(_q, 'ta_tf', 'no'), 'No')
-                            ))
+        ta_transform = st.selectbox(
+            'Transform (Attainment)',
+            options=['No', 'Clip to 100', 'Normalize'],
+            index=['No','Clip to 100','Normalize'].index(
+                TF_IN.get(_qp_get_str(_q, 'ta_tf', 'no'), 'No')
+            ),
+            key="ta_tf",
+        )
 
     # Weights
     if perf_choice == 'Both':
-        w_cr_slider = st.slider('Weight for Conversion (w_cr)', 0.0, 1.0,
-                        float(_qp_get_float(_q, 'w_cr', 0.5)), 0.01)
+        w_cr_slider = st.slider(
+            'Weight for Conversion (w_cr)', 0.0, 1.0,
+            float(_qp_get_float(_q, 'w_cr', 0.5)), 0.01,
+            key="w_cr_slider",
+        )
     elif perf_choice == 'Average % Conversion Rate':
         w_cr_slider = 1.0
         st.info('Using Conversion only (w_cr=1, w_ta=0)')
@@ -553,20 +625,29 @@ with st.expander('Performance calculation', expanded=True):
         w_cr_slider = 0.0
         st.info('Using Attainment only (w_cr=0, w_ta=1)')
 
-    final_transform = st.selectbox('Final transform for Performance %',
-                               options=['No', 'Clip to 100', 'Normalize'],
-                               index=['No','Clip to 100','Normalize'].index(
-                                   TF_IN.get(_qp_get_str(_q, 'final_tf', 'clip'), 'Clip to 100')
-                               ))
+    final_transform = st.selectbox(
+        'Final transform for Performance %',
+        options=['No', 'Clip to 100', 'Normalize'],
+        index=['No','Clip to 100','Normalize'].index(
+            TF_IN.get(_qp_get_str(_q, 'final_tf', 'clip'), 'Clip to 100')
+        ),
+        key="final_tf",
+    )
 
 with st.expander('% Thresholds', expanded=True):
     col_thr1, col_thr2 = st.columns(2)
     with col_thr1:
-        effort_threshold = st.number_input('% Effort Threshold', min_value=0.0, max_value=100.0,
-                                   value=float(_qp_get_float(_q, 'e_thr', 60.0)), step=1.0)
+        effort_threshold = st.number_input(
+            '% Effort Threshold', min_value=0.0,
+            value=float(_qp_get_float(_q, 'e_thr', 60.0)), step=1.0,
+            key="effort_thr", format="%.2f",
+        )
     with col_thr2:
-        performance_threshold = st.number_input('% Performance Threshold', min_value=0.0, max_value=100.0,
-                                        value=float(_qp_get_float(_q, 'p_thr', 60.0)), step=1.0)
+        performance_threshold = st.number_input(
+            '% Performance Threshold', min_value=0.0,
+            value=float(_qp_get_float(_q, 'p_thr', 60.0)), step=1.0,
+            key="perf_thr", format="%.2f",
+        )
 
 # Compute pipeline based on settings
 if coe_selected:
@@ -616,20 +697,37 @@ settings = {
     'person_col': person_col,
 }
 
-# --- Sync URL with current settings & render share URL control ---
 qp_params = settings_to_query_params(settings)
-set_query_params_if_changed(qp_params)
+
+with st.expander("Share / Export", expanded=False):
+    c1, c2 = st.columns([0.6, 0.4])
+    with c1:
+        LIVE_URL_SYNC = st.toggle(
+            "Sync URL as I edit (may slow the app)",
+            value=False,
+            key="live_sync_toggle",
+        )
+    with c2:
+        if st.button("Update URL now", type="secondary", key="sync_now_btn"):
+            set_query_params_if_changed(qp_params)
+
+    if LIVE_URL_SYNC:
+        set_query_params_if_changed(qp_params)
+
+    st.caption("Chart URL")
+    from urllib.parse import urlencode
+    qs = urlencode(qp_params)
+    st.code('https://sdr-quad-visualizer-3xjc29ejzxihpcshuqkyvu.streamlit.app/' + '?' + qs, language='text')
+    # If you want the one-click copy widget, uncomment:
+    # copy_share_url_widget(qp_params)
 
 st.subheader('Copy settings as JSON')
 blob = settings_json_blob(settings)
 copy_to_clipboard_widget(blob, key='settings_json')
 st.download_button('Download settings.json', data=blob, file_name='settings.json', mime='application/json')
 
-# Copy a unique chart URL with current settings embedded
-st.caption('Copy chart URL')
-qs = urlencode(qp_params)
-st.code('https://sdr-quad-visualizer-3xjc29ejzxihpcshuqkyvu.streamlit.app/' + '?' + qs, language='text')  # quick visual of the querystring
-# copy_share_url_widget(qp_params)    # button copies full absolute URL
+
+# https://sdr-quad-visualizer-3xjc29ejzxihpcshuqkyvu.streamlit.app/?person=Person&coe_vars=Average+%25+Conversion+Rate&coe_w=Average+%25+Conversion+Rate%3A1&coe_denom=1&effort=coe&w_coe=1&perf=ta&cr_tf=no&cr_norm=0.025&ta_tf=no&w_cr=0&final_tf=no&e_thr=1&p_thr=60
 
 # =============================
 # 2) Dataset Information Section
